@@ -18,6 +18,7 @@ namespace HandBrakeWPF.ViewModels
     using System.Linq;
     using System.Text.Json;
     using System.Threading;
+    using System.Threading.Tasks;
     using System.Windows;
     using System.Windows.Input;
 
@@ -58,6 +59,7 @@ namespace HandBrakeWPF.ViewModels
     using DataFormats = System.Windows.DataFormats;
     using DragEventArgs = System.Windows.DragEventArgs;
     using Execute = Caliburn.Micro.Execute;
+    using ILog = Services.Logging.Interfaces.ILog;
     using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
     using SaveFileDialog = Microsoft.Win32.SaveFileDialog;
 
@@ -69,6 +71,9 @@ namespace HandBrakeWPF.ViewModels
         private readonly IUpdateService updateService;
         private readonly IWindowManager windowManager;
         private readonly INotifyIconService notifyIconService;
+
+        private readonly ILog logService;
+
         private readonly IUserSettingService userSettingService;
         private readonly IScan scanService;
         private readonly Win7 windowsSeven = new Win7();
@@ -113,7 +118,8 @@ namespace HandBrakeWPF.ViewModels
             IMetaDataViewModel metaDataViewModel,
             IPresetManagerViewModel presetManagerViewModel,
             INotifyIconService notifyIconService,
-            ISystemService systemService)
+            ISystemService systemService,
+            ILog logService)
             : base(userSettingService)
         {
             this.scanService = scanService;
@@ -122,6 +128,7 @@ namespace HandBrakeWPF.ViewModels
             this.updateService = updateService;
             this.windowManager = windowManager;
             this.notifyIconService = notifyIconService;
+            this.logService = logService;
             this.QueueViewModel = queueViewModel;
             this.userSettingService = userSettingService;
             this.queueProcessor = IoC.Get<IQueueService>();
@@ -1152,8 +1159,8 @@ namespace HandBrakeWPF.ViewModels
                     temporaryPreset.Name,
                     Resources.MainView_ModifiedPreset);
                 temporaryPreset.Task = new EncodeTask(this.CurrentTask);
-                temporaryPreset.AudioTrackBehaviours = this.AudioViewModel.AudioBehaviours.Clone();
-                temporaryPreset.SubtitleTrackBehaviours = this.SubtitleViewModel.SubtitleBehaviours.Clone();
+                temporaryPreset.AudioTrackBehaviours = new AudioBehaviours(this.AudioViewModel.AudioBehaviours);
+                temporaryPreset.SubtitleTrackBehaviours = new SubtitleBehaviours(this.SubtitleViewModel.SubtitleBehaviours);
             }
 
             Window window = Application.Current.Windows.Cast<Window>().FirstOrDefault(x => x.GetType() == typeof(QueueSelectionViewModel));
@@ -1210,9 +1217,24 @@ namespace HandBrakeWPF.ViewModels
             {
                 dialog.InitialDirectory = mruDir;
             }
-            
-            bool? dialogResult = dialog.ShowDialog();
 
+            bool? dialogResult = null;
+            try
+            {
+                dialogResult = dialog.ShowDialog();
+            }
+            catch (Exception e)
+            {
+                this.SetMru(Constants.FileScanMru, string.Empty); // RESET MRU in case it's the fault.
+                this.errorService.ShowMessageBox(
+                    Resources.MainViewModel_FilePathSelectError,
+                    Resources.Error,
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                this.logService.LogMessage("Attempted to recover from an error fro the File Scan FileDialog: " + e);
+                return;
+            }
+            
             if (dialogResult.HasValue && dialogResult.Value)
             {
                 this.SetMru(Constants.FileScanMru, Path.GetDirectoryName(dialog.FileName));
@@ -1524,9 +1546,13 @@ namespace HandBrakeWPF.ViewModels
         {
             IAddPresetViewModel presetViewModel = IoC.Get<IAddPresetViewModel>();
             presetViewModel.Setup(this.CurrentTask, this.SelectedTitle, this.AudioViewModel.AudioBehaviours, this.SubtitleViewModel.SubtitleBehaviours);
-            this.windowManager.ShowDialogAsync(presetViewModel);
+            Task<bool?> result = this.windowManager.ShowDialogAsync(presetViewModel);
 
-            this.NotifyOfPropertyChange(() => this.PresetsCategories);
+            if (result.Result.HasValue && result.Result.Value)
+            {
+                this.NotifyOfPropertyChange(() => this.PresetsCategories);
+                this.SelectedPreset = this.presetService.GetPreset(presetViewModel.PresetName);
+            }
         }
 
         public void PresetUpdate()
@@ -1546,7 +1572,7 @@ namespace HandBrakeWPF.ViewModels
                 return;
             }
 
-            if (this.errorService.ShowMessageBox(Resources.Main_PresetUpdateConfrimation, Resources.AreYouSure, MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+            if (this.errorService.ShowMessageBox(Resources.Main_PresetUpdateConfirmation, Resources.AreYouSure, MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
             {
                 this.selectedPreset.Update(new EncodeTask(this.CurrentTask), new AudioBehaviours(this.AudioViewModel.AudioBehaviours), new SubtitleBehaviours(this.SubtitleViewModel.SubtitleBehaviours));
                 this.presetService.Update(this.selectedPreset);
@@ -2015,8 +2041,8 @@ namespace HandBrakeWPF.ViewModels
                 }
                 else
                 {
-                    this.SourceLabel = Resources.Main_ScanFailled_CheckLog;
-                    this.StatusLabel = Resources.Main_ScanFailled_CheckLog;
+                    this.SourceLabel = Resources.Main_ScanFailed_CheckLog;
+                    this.StatusLabel = Resources.Main_ScanFailed_CheckLog;
                 }
             });
         }
@@ -2183,7 +2209,7 @@ namespace HandBrakeWPF.ViewModels
             }
 
             this.VideoViewModel.RefreshTask();
-            this.AudioViewModel.RefreshTask();
+            this.AudioViewModel.RefreshTask(this.CurrentTask.OutputFormat);
             this.SubtitleViewModel.RefreshTask();
         }
     }
